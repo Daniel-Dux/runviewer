@@ -159,6 +159,42 @@ QToolButton:hover:checked {
              </property>
             </widget>
            </item>
+                     <item>
+                        <widget class="QPushButton" name="remove_all_shots">
+                         <property name="maximumSize">
+                            <size>
+                             <width>30</width>
+                             <height>16777215</height>
+                            </size>
+                         </property>
+                         <property name="toolTip">
+                            <string>Remove all shots</string>
+                         </property>
+                         <property name="text">
+                            <string/>
+                         </property>
+                        </widget>
+                     </item>
+           
+                     <item>
+                        <widget class="QPushButton" name="activate_newest_shot">
+                         <property name="maximumSize">
+                            <size>
+                             <width>30</width>
+                             <height>16777215</height>
+                            </size>
+                         </property>
+                         <property name="toolTip">
+                            <string>Toggle: Auto-activate newest shot when loading</string>
+                         </property>
+                         <property name="text">
+                            <string/>
+                         </property>
+                         <property name="checkable">
+                            <bool>true</bool>
+                         </property>
+                        </widget>
+                     </item>
            <item>
             <widget class="Line" name="line">
              <property name="orientation">
@@ -258,6 +294,42 @@ QToolButton:hover:checked {
              </property>
             </widget>
            </item>
+                     <item>
+                        <widget class="QPushButton" name="group_all_channels">
+                         <property name="toolTip">
+                            <string>Group all channels</string>
+                         </property>
+                         <property name="text">
+                            <string/>
+                         </property>
+                        </widget>
+                     </item>
+                     <item>
+                        <widget class="QPushButton" name="release_all_groups">
+                         <property name="toolTip">
+                            <string>Release all groups</string>
+                         </property>
+                         <property name="text">
+                            <string/>
+                         </property>
+                        </widget>
+                     </item>
+              <item>
+               <widget class="QPushButton" name="show_all_channels">
+                <property name="maximumSize">
+                 <size>
+                  <width>30</width>
+                  <height>16777215</height>
+                 </size>
+                </property>
+                <property name="toolTip">
+                            <string>Enable all channels</string>
+                </property>
+                <property name="text">
+                            <string>All</string>
+                </property>
+               </widget>
+              </item>
            <item>
             <spacer name="horizontalSpacer_2">
              <property name="orientation">
@@ -280,6 +352,12 @@ QToolButton:hover:checked {
            </property>
            <property name="selectionMode">
             <enum>QAbstractItemView::ExtendedSelection</enum>
+           </property>
+           <property name="rootIsDecorated">
+            <bool>true</bool>
+           </property>
+           <property name="itemsExpandable">
+            <bool>true</bool>
            </property>
            <property name="sortingEnabled">
             <bool>false</bool>

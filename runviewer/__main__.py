@@ -79,8 +79,10 @@ SHOT_MODEL__COLOUR_INDEX = 0
 SHOT_MODEL__SHUTTER_INDEX = 1
 SHOT_MODEL__CHECKBOX_INDEX = 2
 SHOT_MODEL__PATH_INDEX = 1
-CHANNEL_MODEL__CHECKBOX_INDEX = 0
-CHANNEL_MODEL__CHANNEL_INDEX = 0
+# channel tree: colour swatch + checkable name
+CHANNEL_MODEL__COLOUR_INDEX = 0
+CHANNEL_MODEL__CHECKBOX_INDEX = 1
+CHANNEL_MODEL__CHANNEL_INDEX = 1
 
 
 def format_time(input_sec):
@@ -211,9 +213,20 @@ class RunViewer(object):
 
         # setup channel treeview model
         self.channel_model = QStandardItemModel()
-        self.channel_model.setHorizontalHeaderLabels(['channel'])
+        self.channel_model.setHorizontalHeaderLabels(['colour', 'channel'])
         self.ui.channel_treeview.setModel(self.channel_model)
         self.channel_model.itemChanged.connect(self.update_plots)
+        # Configure tree view columns to show both colour and name
+        self.ui.channel_treeview.resizeColumnToContents(0)
+        self.ui.channel_treeview.resizeColumnToContents(1)
+        # Enable tree structure decoration (expand/collapse arrows)
+        self.ui.channel_treeview.setRootIsDecorated(True)
+        self.ui.channel_treeview.setItemsExpandable(True)
+        self.ui.channel_treeview.setIndentation(20)  # Set indentation for tree levels
+        self.ui.channel_treeview.setUniformRowHeights(False)  # Allow different row heights
+        # colour cycle for grouped channels
+        self.group_colour_cycle = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0),
+                       (255, 0, 255), (0, 255, 255), (128, 128, 128)]
 
         # create a hidden plot widget that all plots can link their x-axis too
         hidden_plot = pg.PlotWidget(name='runviewer - time axis link')
@@ -270,6 +283,12 @@ class RunViewer(object):
         self.ui.disable_selected_shots.setIcon(QIcon(':/qtutils/fugue/ui-check-box-uncheck'))
         self.ui.group_channel.setIcon(QIcon(':/qtutils/fugue/layers-group'))
         self.ui.delete_group.setIcon(QIcon(':/qtutils/fugue/layers-ungroup'))
+        # New controls
+        self.ui.group_all_channels.setIcon(QIcon(':/qtutils/fugue/layers-group'))
+        self.ui.release_all_groups.setIcon(QIcon(':/qtutils/fugue/layers-ungroup'))
+        self.ui.show_all_channels.setIcon(QIcon(':/qtutils/fugue/application-list'))
+        self.ui.remove_all_shots.setIcon(QIcon(':/qtutils/fugue/minus'))
+        self.ui.activate_newest_shot.setIcon(QIcon(':/qtutils/fugue/clock-history'))
         self.ui.channel_move_to_top.setIcon(QIcon(':/qtutils/fugue/arrow-stop-090'))
         self.ui.channel_move_up.setIcon(QIcon(':/qtutils/fugue/arrow-090'))
         self.ui.channel_move_down.setIcon(QIcon(':/qtutils/fugue/arrow-270'))
@@ -305,6 +324,12 @@ class RunViewer(object):
         self.ui.remove_shots.clicked.connect(self.on_remove_shots)
         self.ui.group_channel.clicked.connect(self.on_group_channels)
         self.ui.delete_group.clicked.connect(self.on_delete_group)
+        # New controls handlers
+        self.ui.group_all_channels.clicked.connect(self.on_group_all_channels)
+        self.ui.release_all_groups.clicked.connect(self.on_release_all_groups)
+        self.ui.show_all_channels.clicked.connect(self.on_show_all_channels)
+        self.ui.remove_all_shots.clicked.connect(self.on_remove_all_shots)
+        self.ui.activate_newest_shot.clicked.connect(self.on_activate_newest_shot)
 
         self.ui.actionOpen_Shot.triggered.connect(self.on_add_shot)
         self.ui.actionQuit.triggered.connect(self.ui.close)
@@ -323,6 +348,7 @@ class RunViewer(object):
         self.plot_widgets = {}
         self.plot_items = {}
         self.shutter_lines = {}
+        self._updating_plots = False  # Guard against recursive calls to update_plots
 
         try:
             self.default_config_path = os.path.join(exp_config.get('DEFAULT', 'app_saved_configs'), 'runviewer')
@@ -355,12 +381,20 @@ class RunViewer(object):
     def _update_markers(self, index):
         for line, plot in self.all_marker_items.items():
             # line.blockSignals(True)
-            plot.removeItem(line)
+            try:
+                plot.removeItem(line)
+            except RuntimeError:
+                # Plot widget has been deleted, skip
+                pass
         self.all_marker_items = {}
 
         for line, plot in self.movable_marker_items.items():
             # line.blockSignals(True)
-            plot.removeItem(line)
+            try:
+                plot.removeItem(line)
+            except RuntimeError:
+                # Plot widget has been deleted, skip
+                pass
         self.movable_marker_items = {}
         self.marker_times_unscaled = {}
 
@@ -435,14 +469,16 @@ class RunViewer(object):
                     unscaled_t = scaled_t
                 if unscaled_t is not None:
                     pos = QPoint(glob_pos.x(), glob_pos.y())
-                    plot_data = ui.plotItem.listDataItems()[0].getData()
-                    if plot_data[0] is not None and scaled_t is not None:
-                        nearest_index = numpy.abs(plot_data[0] - scaled_t).argmin() - 1
-                        y_val = "{:.2f}".format(plot_data[1][nearest_index])
-                    else:
-                        y_val = '-'
-                    text = "Plot: {} \nTime: {:.9f}s\nValue: {}".format(name, unscaled_t, y_val)
-                    QToolTip.showText(pos, text)
+                    plot_items = ui.plotItem.listDataItems()
+                    if plot_items and plot_items[0] is not None:
+                        plot_data = plot_items[0].getData()
+                        if plot_data[0] is not None and scaled_t is not None:
+                            nearest_index = numpy.abs(plot_data[0] - scaled_t).argmin() - 1
+                            y_val = "{:.2f}".format(plot_data[1][nearest_index])
+                        else:
+                            y_val = '-'
+                        text = "Plot: {} \nTime: {:.9f}s\nValue: {}".format(name, unscaled_t, y_val)
+                        QToolTip.showText(pos, text)
 
     def _reset_linear_time(self):
         self.scale_time = False
@@ -600,16 +636,16 @@ class RunViewer(object):
             channels = runviewer_config.get('channels', {})
 
             for row, (channel, checked) in enumerate(channels):
-                check_items = self.channel_model.findItems(channel)
+                check_items = self.channel_model.findItems(channel, Qt.MatchExactly, CHANNEL_MODEL__CHANNEL_INDEX)
                 if len(check_items) == 0:
-                    items = []
+                    colour_item = QStandardItem('')
+                    colour_item.setEditable(False)
                     check_item = QStandardItem(channel)
                     check_item.setEditable(False)
                     check_item.setCheckable(True)
-                    items.append(check_item)
                     check_item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
                     check_item.setEnabled(False)
-                    self.channel_model.insertRow(row, items)
+                    self.channel_model.insertRow(row, [colour_item, check_item])
                 else:
                     check_item = check_items[0]
                     check_item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
@@ -635,19 +671,22 @@ class RunViewer(object):
         # Get selected items - both channels and groups
         selected_channels = []
         selected_groups = []
-        selected_indices = self.ui.channel_treeview.selectedIndexes()
+        # Get all selected indices from any column to get full row selections
+        selected_indices = self.ui.channel_treeview.selectionModel().selectedRows()
         
         for index in selected_indices:
-            if index.column() == CHANNEL_MODEL__CHECKBOX_INDEX:
-                item = self.channel_model.itemFromIndex(index)
-                if item and item.isEnabled():
-                    if item.data(Qt.UserRole) == 'group':
-                        # This is a group
-                        selected_groups.append(item)
-                    else:
-                        # This is a channel - check if already in a group
-                        if item.parent() is None or item.parent() == self.channel_model.invisibleRootItem():
-                            selected_channels.append(item)
+            # Check column 0 to see if this is a group (tree structure is in column 0)
+            colour_item = self.channel_model.item(index.row(), CHANNEL_MODEL__COLOUR_INDEX)
+            # Get the item from the channel name column (column 1)
+            item = self.channel_model.item(index.row(), CHANNEL_MODEL__CHANNEL_INDEX)
+            if item and item.isEnabled():
+                if colour_item and colour_item.data(Qt.UserRole) == 'group':
+                    # This is a group
+                    selected_groups.append(item)
+                else:
+                    # This is a channel - check if already in a group
+                    if item.parent() is None or item.parent() == self.channel_model.invisibleRootItem():
+                        selected_channels.append(item)
         
         # Case 1: Multiple groups selected - error
         if len(selected_groups) > 1:
@@ -671,18 +710,45 @@ class RunViewer(object):
             channel_names = [str(item.text()) for item in selected_channels]
             self.channel_groups[group_name].extend(channel_names)
             
-            # Move channels as children of the group
+            # Move channels as children of the group and remove their individual plots
             for item in selected_channels:
+                channel_name = str(item.text())
+                # Remember the check state before moving
+                was_checked = item.checkState() == Qt.Checked
+                # Remove individual plot widget if it exists
+                if channel_name in self.plot_widgets:
+                    self.ui.plot_layout.removeWidget(self.plot_widgets[channel_name])
+                    self.plot_widgets[channel_name].deleteLater()
+                    del self.plot_widgets[channel_name]
+                # Remove plot items for this channel
+                if channel_name in self.plot_items:
+                    del self.plot_items[channel_name]
+                # Remove shutter lines for this channel
+                if channel_name in self.shutter_lines:
+                    del self.shutter_lines[channel_name]
+                
                 taken_items = self.channel_model.takeRow(item.row())
-                group_item.appendRow(taken_items)
+                # Ensure taken items have both colour and name columns
+                while len(taken_items) < 2:
+                    taken_items.insert(0, QStandardItem(''))
+                # Ensure the name item is checkable and set its check state
+                name_item = taken_items[CHANNEL_MODEL__CHANNEL_INDEX]
+                if name_item:
+                    name_item.setCheckable(True)
+                    # Restore the check state before appending to group
+                    name_item.setCheckState(Qt.Checked if was_checked else Qt.Unchecked)
+                # Append children to the first column item (group_colour_item)
+                group_colour_item.appendRow(taken_items)
             
             self.channel_model.blockSignals(False)
             self.channel_model.layoutChanged.emit()
+            self._apply_group_colours(group_name)
             
             # Restore expansion state
             if was_expanded:
                 self.ui.channel_treeview.expand(group_index)
             
+            self.update_plot_positions()
             self.update_plots()
             return
         
@@ -712,88 +778,384 @@ class RunViewer(object):
         self.channel_model.blockSignals(True)
         
         # Create parent group item in treeview
+        # Note: In QTreeView, the first column item is the parent for tree structure
+        group_colour_item = QStandardItem('')
+        group_colour_item.setEditable(False)
+        group_colour_item.setCheckable(True)
+        group_colour_item.setCheckState(Qt.Checked)
+        group_colour_item.setData('group', Qt.UserRole)  # Mark as group
+        
         group_item = QStandardItem(group_name)
         group_item.setEditable(False)
-        group_item.setCheckable(True)
-        group_item.setCheckState(Qt.Checked)
-        group_item.setData('group', Qt.UserRole)  # Mark as group
         
         # Move channels as children of the group (in reverse order to preserve positions)
         rows_to_remove = []
         for item in selected_channels:
             row = item.row()
             rows_to_remove.append(row)
+            channel_name = str(item.text())
+            # Remember the check state before moving
+            was_checked = item.checkState() == Qt.Checked
+            # Remove individual plot widget if it exists
+            if channel_name in self.plot_widgets:
+                self.ui.plot_layout.removeWidget(self.plot_widgets[channel_name])
+                self.plot_widgets[channel_name].deleteLater()
+                del self.plot_widgets[channel_name]
+            # Remove plot items for this channel
+            if channel_name in self.plot_items:
+                del self.plot_items[channel_name]
+            # Remove shutter lines for this channel
+            if channel_name in self.shutter_lines:
+                del self.shutter_lines[channel_name]
+            
             taken_items = self.channel_model.takeRow(row)
-            group_item.appendRow(taken_items)
+            # Ensure taken items have both colour and name columns
+            while len(taken_items) < 2:
+                taken_items.insert(0, QStandardItem(''))
+            # Ensure the name item is checkable and set its check state
+            name_item = taken_items[CHANNEL_MODEL__CHANNEL_INDEX]
+            if name_item:
+                name_item.setCheckable(True)
+                # Restore the check state before appending to group
+                name_item.setCheckState(Qt.Checked if was_checked else Qt.Unchecked)
+            # Append children to the first column item (group_colour_item)
+            group_colour_item.appendRow(taken_items)
         
-        self.channel_model.appendRow([group_item])
+        self.channel_model.appendRow([group_colour_item, group_item])
         self.channel_model.blockSignals(False)
         self.channel_model.layoutChanged.emit()
+        self._apply_group_colours(group_name)
         
         # Expand the newly created group
         group_index = self.channel_model.indexFromItem(group_item)
         self.ui.channel_treeview.expand(group_index)
         
+        self.update_plot_positions()
         self.update_plots()
 
     def on_delete_group(self):
         """Delete selected group and restore individual channels"""
-        selected_indices = self.ui.channel_treeview.selectedIndexes()
+        selected_indices = self.ui.channel_treeview.selectionModel().selectedRows()
         
         for index in selected_indices:
-            if index.column() == CHANNEL_MODEL__CHECKBOX_INDEX:
-                item = self.channel_model.itemFromIndex(index)
-                if item and item.data(Qt.UserRole) == 'group':
-                    group_name = str(item.text())
-                    
-                    # Block signals while modifying model
-                    self.channel_model.blockSignals(True)
-                    
-                    # Move children back to root
+            # Check column 0 to see if this is a group
+            colour_item = self.channel_model.item(index.row(), CHANNEL_MODEL__COLOUR_INDEX)
+            # Get item from the channel column
+            item = self.channel_model.item(index.row(), CHANNEL_MODEL__CHANNEL_INDEX)
+            if item and colour_item and colour_item.data(Qt.UserRole) == 'group':
+                group_name = str(item.text())
+                
+                # Block signals while modifying model
+                self.channel_model.blockSignals(True)
+                
+                # Move children back to root
+                children_items = []
+                while colour_item.rowCount() > 0:
+                    child_row = colour_item.takeRow(0)
+                    # Clear the color from the colour item when ungrouping
+                    if len(child_row) > 0:
+                        child_colour_item = child_row[CHANNEL_MODEL__COLOUR_INDEX]
+                        if child_colour_item:
+                            child_colour_item.setData(QIcon(), Qt.DecorationRole)
+                    children_items.append(child_row)
+                
+                # Insert children back into model
+                for child_row in children_items:
+                    self.channel_model.appendRow(child_row)
+                
+                # Remove group
+                # Find the group item's position in the model
+                group_row = -1
+                for i in range(self.channel_model.rowCount()):
+                    if self.channel_model.item(i, CHANNEL_MODEL__CHANNEL_INDEX) == item:
+                        group_row = i
+                        break
+                if group_row >= 0:
+                    self.channel_model.removeRow(group_row)
+                
+                # Remove from tracking
+                if group_name in self.channel_groups:
+                    del self.channel_groups[group_name]
+                if group_name in self.group_plot_widgets:
+                    plot_widget = self.group_plot_widgets[group_name]
+                    self.ui.plot_layout.removeWidget(plot_widget)
+                    plot_widget.deleteLater()
+                    del self.group_plot_widgets[group_name]
+                if group_name in self.plot_items:
+                    del self.plot_items[group_name]
+                if group_name in self.shutter_lines:
+                    del self.shutter_lines[group_name]
+                
+                self.channel_model.blockSignals(False)
+                self.channel_model.layoutChanged.emit()
+                self.update_plots()
+                break
+
+    def on_group_all_channels(self):
+        """Group all channels (including those currently in groups) into a single group."""
+        group_name = 'All Channels'
+        
+        # If group already exists, prompt to overwrite
+        if group_name in self.channel_groups:
+            reply = QMessageBox.question(self.ui, 'Group All Channels',
+                                         f'A group named "{group_name}" already exists. Replace it?',
+                                         QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.No:
+                return
+            # Remove existing group entry
+            # Find and delete the group item
+            for i in range(self.channel_model.rowCount()):
+                colour_item = self.channel_model.item(i, CHANNEL_MODEL__COLOUR_INDEX)
+                item = self.channel_model.item(i, CHANNEL_MODEL__CHECKBOX_INDEX)
+                if item and colour_item and colour_item.data(Qt.UserRole) == 'group' and str(item.text()) == group_name:
+                    # Releasing its children first
                     children_items = []
-                    while item.rowCount() > 0:
-                        child_row = item.takeRow(0)
-                        children_items.append(child_row)
-                    
-                    # Insert children back into model
+                    while colour_item.rowCount() > 0:
+                        children_items.append(colour_item.takeRow(0))
                     for child_row in children_items:
                         self.channel_model.appendRow(child_row)
-                    
-                    # Remove group
-                    self.channel_model.removeRow(item.row())
-                    
-                    # Remove from tracking
-                    if group_name in self.channel_groups:
-                        del self.channel_groups[group_name]
-                    if group_name in self.group_plot_widgets:
-                        plot_widget = self.group_plot_widgets[group_name]
-                        self.ui.plot_layout.removeWidget(plot_widget)
-                        plot_widget.deleteLater()
-                        del self.group_plot_widgets[group_name]
-                    if group_name in self.plot_items:
-                        del self.plot_items[group_name]
-                    if group_name in self.shutter_lines:
-                        del self.shutter_lines[group_name]
-                    
-                    self.channel_model.blockSignals(False)
-                    self.channel_model.layoutChanged.emit()
-                    self.update_plots()
+                    self.channel_model.removeRow(i)
                     break
+            # Clean tracking
+            self.channel_groups.pop(group_name, None)
+            if group_name in self.group_plot_widgets:
+                plot_widget = self.group_plot_widgets[group_name]
+                self.ui.plot_layout.removeWidget(plot_widget)
+                plot_widget.deleteLater()
+                self.group_plot_widgets.pop(group_name, None)
+            self.plot_items.pop(group_name, None)
+            self.shutter_lines.pop(group_name, None)
+
+        # Collect all channels from root and groups
+        channels_to_move = []
+        group_items = []
+        for i in range(self.channel_model.rowCount()):
+            item = self.channel_model.item(i, CHANNEL_MODEL__CHECKBOX_INDEX)
+            if item and item.data(Qt.UserRole) == 'group':
+                group_items.append(item)
+            else:
+                channels_to_move.append(item)
+
+        # Create new group item
+        # Note: In QTreeView, the first column item is the parent for tree structure
+        group_colour_item = QStandardItem('')
+        group_colour_item.setEditable(False)
+        group_colour_item.setCheckable(True)
+        group_colour_item.setCheckState(Qt.Checked)
+        group_colour_item.setData('group', Qt.UserRole)
+        
+        group_item = QStandardItem(group_name)
+        group_item.setEditable(False)
+
+        self.channel_model.blockSignals(True)
+        
+        # Move root channels into group
+        for item in reversed(channels_to_move):
+            row = item.row()
+            channel_name = str(item.text())
+            # Remember the check state before moving
+            was_checked = item.checkState() == Qt.Checked
+            # Remove individual plot widget if it exists
+            if channel_name in self.plot_widgets:
+                self.ui.plot_layout.removeWidget(self.plot_widgets[channel_name])
+                self.plot_widgets[channel_name].deleteLater()
+                del self.plot_widgets[channel_name]
+            # Remove plot items for this channel
+            if channel_name in self.plot_items:
+                del self.plot_items[channel_name]
+            # Remove shutter lines for this channel
+            if channel_name in self.shutter_lines:
+                del self.shutter_lines[channel_name]
+            
+            taken = self.channel_model.takeRow(row)
+            # Ensure taken items have both colour and name columns
+            while len(taken) < 2:
+                taken.insert(0, QStandardItem(''))
+            # Ensure the name item is checkable and set its check state
+            name_item = taken[CHANNEL_MODEL__CHANNEL_INDEX]
+            if name_item:
+                name_item.setCheckable(True)
+                # Restore the check state before appending to group
+                name_item.setCheckState(Qt.Checked if was_checked else Qt.Unchecked)
+            # Append children to the first column item (group_colour_item)
+            group_colour_item.appendRow(taken)
+
+        # Move children of existing groups into new group and remove those groups
+        for gitem in group_items:
+            # Get the column 0 item which actually holds children in the tree
+            gitem_colour = self.channel_model.item(gitem.row(), CHANNEL_MODEL__COLOUR_INDEX)
+            while gitem_colour and gitem_colour.rowCount() > 0:
+                child_row = gitem_colour.takeRow(0)
+                # Ensure child rows have both colour and name columns
+                while len(child_row) < 2:
+                    child_row.insert(0, QStandardItem(''))
+                # Ensure the name item is checkable
+                name_item = child_row[CHANNEL_MODEL__CHANNEL_INDEX]
+                if name_item:
+                    name_item.setCheckable(True)
+                group_colour_item.appendRow(child_row)
+            # remove the empty group from model
+            self.channel_model.removeRow(gitem.row())
+
+        # Append the new group
+        self.channel_model.appendRow([group_colour_item, group_item])
+        
+        # Update tracking list (use the colour item's children since it holds the tree structure)
+        child_names = []
+        for j in range(group_colour_item.rowCount()):
+            child = group_colour_item.child(j, CHANNEL_MODEL__CHANNEL_INDEX)
+            if child:
+                child_names.append(str(child.text()))
+        self.channel_groups[group_name] = child_names
+        
+        self.channel_model.blockSignals(False)
+        self._apply_group_colours(group_name)
+        self.channel_model.layoutChanged.emit()
+        
+        # Expand and refresh
+        self.ui.channel_treeview.expand(self.channel_model.indexFromItem(group_colour_item))
+        self.update_plot_positions()
+        self.update_plots()
+
+    def on_release_all_groups(self):
+        """Release all groups back into individual channels."""
+        self.channel_model.blockSignals(True)
+        groups_to_remove = []
+        
+        # Identify all group items
+        for i in range(self.channel_model.rowCount()):
+            colour_item = self.channel_model.item(i, CHANNEL_MODEL__COLOUR_INDEX)
+            item = self.channel_model.item(i, CHANNEL_MODEL__CHECKBOX_INDEX)
+            if colour_item and colour_item.data(Qt.UserRole) == 'group':
+                groups_to_remove.append((colour_item, item))
+        
+        # Move children to root and remove groups
+        for colour_item, group_item in groups_to_remove:
+            group_name = str(group_item.text())
+            children_items = []
+            while colour_item.rowCount() > 0:
+                child_row = colour_item.takeRow(0)
+                # Clear the color from the colour item when ungrouping
+                if len(child_row) > 0:
+                    child_colour_item = child_row[CHANNEL_MODEL__COLOUR_INDEX]
+                    if child_colour_item:
+                        child_colour_item.setData(QIcon(), Qt.DecorationRole)
+                children_items.append(child_row)
+            for child_row in children_items:
+                self.channel_model.appendRow(child_row)
+            self.channel_model.removeRow(group_item.row())
+            
+            # Cleanup tracking and plot widgets
+            self.channel_groups.pop(group_name, None)
+            if group_name in self.group_plot_widgets:
+                plot_widget = self.group_plot_widgets[group_name]
+                self.ui.plot_layout.removeWidget(plot_widget)
+                plot_widget.deleteLater()
+                self.group_plot_widgets.pop(group_name, None)
+            self.plot_items.pop(group_name, None)
+            self.shutter_lines.pop(group_name, None)
+        
+        self.channel_model.blockSignals(False)
+        self.channel_model.layoutChanged.emit()
+        self.update_plot_positions()
+        self.update_plots()
+
+    def on_show_all_channels(self):
+        """Check all enabled channels (and groups) so every channel is shown."""
+
+        def check_branch(item):
+            if item is None:
+                return
+            if item.isEnabled():
+                item.setCheckState(Qt.Checked)
+            for i in range(item.rowCount()):
+                child = item.child(i, 0)
+                check_branch(child)
+
+        self.channel_model.blockSignals(True)
+        for i in range(self.channel_model.rowCount()):
+            check_branch(self.channel_model.item(i, CHANNEL_MODEL__CHECKBOX_INDEX))
+        self.channel_model.blockSignals(False)
+        self.channel_model.layoutChanged.emit()
+        self.update_plot_positions()
+        self.update_plots()
+
+    def on_remove_all_shots(self):
+        """Remove all shots from the viewer."""
+        if self.shot_model.rowCount() == 0:
+            return
+        reply = QMessageBox.question(self.ui, 'Runviewer', 'Remove all shots?',
+                                     QMessageBox.Yes | QMessageBox.No)
+        if reply == QMessageBox.No:
+            return
+        
+        # Clear markers from UI plots
+        for line, plot in list(self.all_marker_items.items()):
+            plot.removeItem(line)
+        self.all_marker_items = {}
+        for line, plot in list(self.movable_marker_items.items()):
+            plot.removeItem(line)
+        self.movable_marker_items = {}
+        self.all_markers = {}
+
+        # Clear the shots model
+        for row in reversed(range(self.shot_model.rowCount())):
+            self.shot_model.removeRow(row)
+        
+        # Reset markers combo box to default first item
+        self.ui.markers_comboBox.setCurrentIndex(0)
+        while self.ui.markers_comboBox.count() > 1:
+            self.ui.markers_comboBox.removeItem(1)
+        
+        # Update channels and plots
+        self.update_channels_treeview()
+        self.update_plots()
+
+    def on_activate_newest_shot(self):
+        """Toggle: Enable/disable auto-activation of newest shot when loading new shots.
+        
+        This button only toggles the mode - when enabled, newly added shots will automatically
+        become the active shot and deactivate all others. When disabled, new shots are added
+        without auto-activation.
+        """
+        # The button just toggles its state; the actual behavior is handled in load_shot()
+        pass
 
     def on_toggle_shutter(self, checked, current_shot):
-        for channel in self.shutter_lines:
-            for shot in self.shutter_lines[channel]:
-                if shot == current_shot:
-                    for line in self.shutter_lines[channel][shot][0]:
-                        if checked:
-                            line.show()
+        for channel_or_group in self.shutter_lines:
+            item = self.shutter_lines[channel_or_group]
+            
+            # Check if this is a grouped channel (dict structure) or individual channel (dict with shot keys)
+            if isinstance(item, dict):
+                for shot in item:
+                    if shot == current_shot:
+                        shot_item = item[shot]
+                        
+                        # For groups, the structure is group_name -> shot -> channel -> [close_lines, open_lines]
+                        if isinstance(shot_item, dict):
+                            for channel in shot_item:
+                                for line in shot_item[channel][0]:
+                                    if checked:
+                                        line.show()
+                                    else:
+                                        line.hide()
+                                for line in shot_item[channel][1]:
+                                    if checked:
+                                        line.show()
+                                    else:
+                                        line.hide()
+                        # For individual channels, the structure is channel -> shot -> [close_lines, open_lines]
                         else:
-                            line.hide()
-                    for line in self.shutter_lines[channel][shot][1]:
-                        if checked:
-                            line.show()
-                        else:
-                            line.hide()
+                            for line in shot_item[0]:
+                                if checked:
+                                    line.show()
+                                else:
+                                    line.hide()
+                            for line in shot_item[1]:
+                                if checked:
+                                    line.show()
+                                else:
+                                    line.hide()
 
     def on_add_shot(self):
         selected_files = QFileDialog.getOpenFileNames(self.ui, "Select file to load", self.last_opened_shots_folder, "HDF5 files (*.h5 *.hdf5)")
@@ -952,6 +1314,29 @@ class RunViewer(object):
         shot_combobox_index = self.ui.markers_comboBox.findText(os.path.basename(shot.path))
         self.ui.markers_comboBox.model().item(shot_combobox_index).setEnabled(False)
 
+        # If "activate newest shot" toggle is enabled, activate this newly loaded shot
+        if self.ui.activate_newest_shot.isChecked():
+            # Deactivate all other shots
+            for row in range(self.shot_model.rowCount() - 1):  # -1 to exclude the shot just added
+                check_item_other = self.shot_model.item(row, SHOT_MODEL__CHECKBOX_INDEX)
+                shutter_item_other = self.shot_model.item(row, SHOT_MODEL__SHUTTER_INDEX)
+                check_item_other.setCheckState(Qt.Unchecked)
+                if shutter_item_other is not None:
+                    shutter_item_other.setEnabled(False)
+            
+            # Activate the newly added shot (last row)
+            new_row = self.shot_model.rowCount() - 1
+            check_item_new = self.shot_model.item(new_row, SHOT_MODEL__CHECKBOX_INDEX)
+            shutter_item_new = self.shot_model.item(new_row, SHOT_MODEL__SHUTTER_INDEX)
+            check_item_new.setCheckState(Qt.Checked)
+            if shot.shutter_times != {}:
+                shutter_item_new.setEnabled(True)
+            
+            # Update markers combo to show this new shot
+            self.ui.markers_comboBox.setCurrentIndex(shot_combobox_index)
+            self.update_channels_treeview()
+            self.update_plots()
+
         # only do this if we are checking the shot we are adding
         # self.update_channels_treeview()
 
@@ -977,6 +1362,11 @@ class RunViewer(object):
             channels[shot] = set(shot.channels)
         channels_set = frozenset().union(*channels.values())
 
+        # Get channels that are part of groups
+        grouped_channels = set()
+        for group_name, channels_in_group in self.channel_groups.items():
+            grouped_channels.update(channels_in_group)
+
         # now find channels in channels_set which are not in the treeview, and add them
         # now find channels in channels set which are already in the treeview, but deactivated, and activate them
         treeview_channels_dict = {}
@@ -996,19 +1386,16 @@ class RunViewer(object):
         # speed up working with self.channel_model by blocking signals and later reenabeling them
         self.channel_model.blockSignals(True)
 
-        # find list of channels to work with
-        channels_to_add = channels_set.difference(treeview_channels)
+        # find list of channels to work with - only add those not in groups
+        channels_to_add = channels_set.difference(treeview_channels).difference(grouped_channels)
         for channel in sorted(channels_to_add):
-            items = []
+            colour_item = QStandardItem('')
+            colour_item.setEditable(False)
             check_item = QStandardItem(channel)
             check_item.setEditable(False)
             check_item.setCheckable(True)
             check_item.setCheckState(Qt.Unchecked)
-            items.append(check_item)
-            # channel_name_item = QStandardItem(channel)
-            # channel_name_item.setEditable(False)
-            # items.append(channel_name_item)
-            self.channel_model.appendRow(items)
+            self.channel_model.appendRow([colour_item, check_item])
 
         channels_to_reactivate = deactivated_treeview_channels.intersection(channels_set)
         for channel in channels_to_reactivate:
@@ -1018,12 +1405,15 @@ class RunViewer(object):
                 item.setSelectable(True)
 
         # now find channels in the treeview which are not in the channels_set and deactivate them
+        # BUT: don't disable groups, keep them enabled
         channels_to_deactivate = treeview_channels.difference(channels_set)
         for channel in channels_to_deactivate:
             for i in range(self.channel_model.columnCount()):
                 item = self.channel_model.item(treeview_channels_dict[channel], i)
-                item.setEnabled(False)
-                item.setSelectable(False)
+                # Check if this is a group - if so, don't disable it
+                if item.data(Qt.UserRole) != 'group':
+                    item.setEnabled(False)
+                    item.setSelectable(False)
 
         self.channel_model.blockSignals(False)
         self.channel_model.layoutChanged.emit()
@@ -1033,107 +1423,124 @@ class RunViewer(object):
         self.update_plots()
 
     def update_plots(self):
-        # get list of selected shots
-        ticked_shots = self.get_selected_shots_and_colours()
+        # Guard against recursive calls
+        if self._updating_plots:
+            return
+        self._updating_plots = True
+        try:
+            # get list of selected shots
+            ticked_shots = self.get_selected_shots_and_colours()
 
-        # SHould we rescale the x-axis?
-        # if self._hidden_plot[0].getViewBox.getState()['autoRange'][0]:
-        #    self._hidden_plot[0].enableAutoRange(axis=pg.ViewBox.XAxis)
-        # else:
-        #    self._hidden_plot[0].enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
+            # SHould we rescale the x-axis?
+            # if self._hidden_plot[0].getViewBox.getState()['autoRange'][0]:
+            #    self._hidden_plot[0].enableAutoRange(axis=pg.ViewBox.XAxis)
+            # else:
+            #    self._hidden_plot[0].enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
 
-        # find stop time of longest ticked shot
+            # find stop time of longest ticked shot
 
-        largest_stop_time = 0
-        stop_time_set = False
-        for shot in ticked_shots.keys():
-            if self.scale_time:
-                st = self.scalehandler.get_scaled_time(shot.stop_time)
-            else:
-                st = shot.stop_time
-            if st > largest_stop_time:
-                largest_stop_time = st
-                stop_time_set = True
-        if not stop_time_set:
-            largest_stop_time = 1.0
+            largest_stop_time = 0
+            stop_time_set = False
+            for shot in ticked_shots.keys():
+                if self.scale_time:
+                    st = self.scalehandler.get_scaled_time(shot.stop_time)
+                else:
+                    st = shot.stop_time
+                if st > largest_stop_time:
+                    largest_stop_time = st
+                    stop_time_set = True
+            if not stop_time_set:
+                largest_stop_time = 1.0
 
-        # Update the range of the link plot
-        self._hidden_plot[1].setData([0, largest_stop_time], [0, 1e-9])
+            # Update the range of the link plot
+            self._hidden_plot[1].setData([0, largest_stop_time], [0, 1e-9])
 
-        # Update plots
-        for i in range(self.channel_model.rowCount()):
-            check_item = self.channel_model.item(i, CHANNEL_MODEL__CHECKBOX_INDEX)
-            
-            # Check if this is a group
-            if check_item.data(Qt.UserRole) == 'group':
-                group_name = str(check_item.text())
-                if check_item.checkState() == Qt.Checked and check_item.isEnabled():
-                    # Collect all enabled AND checked channels in the group
-                    channels_in_group = []
-                    for j in range(check_item.rowCount()):
-                        child_item = check_item.child(j, 0)
-                        if child_item and child_item.isEnabled() and child_item.checkState() == Qt.Checked:
-                            channels_in_group.append(str(child_item.text()))
+            # Update plots
+            for i in range(self.channel_model.rowCount()):
+                # Check column 0 first to see if this is a group (tree structure is in column 0)
+                colour_item = self.channel_model.item(i, CHANNEL_MODEL__COLOUR_INDEX)
+                
+                # Check if this is a group
+                if colour_item and colour_item.data(Qt.UserRole) == 'group':
+                    # Get the group name from column 1
+                    name_item = self.channel_model.item(i, CHANNEL_MODEL__CHANNEL_INDEX)
+                    group_name = str(name_item.text()) if name_item else ''
                     
-                    if channels_in_group:
-                        self.create_grouped_plot(group_name, channels_in_group, ticked_shots)
+                    if colour_item.checkState() == Qt.Checked and colour_item.isEnabled():
+                        # Collect all enabled AND checked channels in the group
+                        # Both the group and individual channels must be checked to show
+                        channels_in_group = []
+                        for j in range(colour_item.rowCount()):
+                            child_item = colour_item.child(j, CHANNEL_MODEL__CHANNEL_INDEX)
+                            if child_item and child_item.isEnabled() and child_item.checkState() == Qt.Checked:
+                                channels_in_group.append(str(child_item.text()))
+                        
+                        if channels_in_group:
+                            self.create_grouped_plot(group_name, channels_in_group, ticked_shots)
+                    else:
+                        if group_name in self.group_plot_widgets:
+                            self.group_plot_widgets[group_name].hide()
+                    continue
+                
+                # Not a group - handle as individual channel
+                check_item = self.channel_model.item(i, CHANNEL_MODEL__CHECKBOX_INDEX)
+                if not check_item:
+                    continue
+                    
+                channel = str(check_item.text())
+                if check_item.checkState() == Qt.Checked and check_item.isEnabled():
+                    # we want to show this plot
+                    # does a plot already exist? If yes, show it
+                    if channel in self.plot_widgets:
+                        self.plot_widgets[channel].show()
+                        # update the plot
+                        # are there are plot items for this channel which are shown that should not be?
+                        to_delete = []
+                        for shot in self.plot_items[channel]:
+                            if shot not in ticked_shots.keys():
+                                self.plot_widgets[channel].removeItem(self.plot_items[channel][shot])
+                                # Remove Shutter Markers of unticked Shots
+                                if shot in self.shutter_lines[channel]:
+                                    for line in self.shutter_lines[channel][shot][0]:
+                                        self.plot_widgets[channel].removeItem(line)
+                                    for line in self.shutter_lines[channel][shot][1]:
+                                        self.plot_widgets[channel].removeItem(line)
+                                    self.shutter_lines[channel].pop(shot)
+                                to_delete.append(shot)
+                        for shot in to_delete:
+                            del self.plot_items[channel][shot]
+
+                        # do we need to add any plot items for shots that were not previously selected?
+                        for shot, (colour, shutters_checked) in ticked_shots.items():
+                            if shot not in self.plot_items[channel]:
+                                # plot_item = self.plot_widgets[channel].plot(shot.traces[channel][0], shot.traces[channel][1], pen=pg.mkPen(QColor(colour), width=2))
+                                # Add empty plot as it the custom resampling we do will happen quicker if we don't attempt to first plot all of the data
+                                plot_item = self.plot_widgets[channel].plot([0, 0], [0], pen=pg.mkPen(QColor(colour), width=2), stepMode='center')
+                                self.plot_items[channel][shot] = plot_item
+
+                            # Add Shutter Markers of newly ticked Shots
+                            self.add_shutter_markers(shot, channel, shutters_checked)
+
+                        for t, m in self.all_markers.items():
+                            color = m['color']
+                            color = QColor(color[0], color[1], color[2])
+                            if self.scale_time and self.scalehandler is not None:
+                                t = self.scalehandler.get_scaled_time(t)
+                            line = self.plot_widgets[channel].addLine(x=t, pen=pg.mkPen(color=color, width=1.5, style=Qt.DashLine))
+                            self.all_marker_items[line] = self.plot_widgets[channel]
+
+                    # If no, create one
+                    else:
+                        self.create_plot(channel, ticked_shots)
+
                 else:
-                    if group_name in self.group_plot_widgets:
-                        self.group_plot_widgets[group_name].hide()
-                continue
-            
-            channel = str(check_item.text())
-            if check_item.checkState() == Qt.Checked and check_item.isEnabled():
-                # we want to show this plot
-                # does a plot already exist? If yes, show it
-                if channel in self.plot_widgets:
-                    self.plot_widgets[channel].show()
-                    # update the plot
-                    # are there are plot items for this channel which are shown that should not be?
-                    to_delete = []
-                    for shot in self.plot_items[channel]:
-                        if shot not in ticked_shots.keys():
-                            self.plot_widgets[channel].removeItem(self.plot_items[channel][shot])
-                            # Remove Shutter Markers of unticked Shots
-                            if shot in self.shutter_lines[channel]:
-                                for line in self.shutter_lines[channel][shot][0]:
-                                    self.plot_widgets[channel].removeItem(line)
-                                for line in self.shutter_lines[channel][shot][1]:
-                                    self.plot_widgets[channel].removeItem(line)
-                                self.shutter_lines[channel].pop(shot)
-                            to_delete.append(shot)
-                    for shot in to_delete:
-                        del self.plot_items[channel][shot]
+                    if channel not in self.plot_widgets:
+                        self.create_plot(channel, ticked_shots)
+                    self.plot_widgets[channel].hide()
 
-                    # do we need to add any plot items for shots that were not previously selected?
-                    for shot, (colour, shutters_checked) in ticked_shots.items():
-                        if shot not in self.plot_items[channel]:
-                            # plot_item = self.plot_widgets[channel].plot(shot.traces[channel][0], shot.traces[channel][1], pen=pg.mkPen(QColor(colour), width=2))
-                            # Add empty plot as it the custom resampling we do will happen quicker if we don't attempt to first plot all of the data
-                            plot_item = self.plot_widgets[channel].plot([0, 0], [0], pen=pg.mkPen(QColor(colour), width=2), stepMode='center')
-                            self.plot_items[channel][shot] = plot_item
-
-                        # Add Shutter Markers of newly ticked Shots
-                        self.add_shutter_markers(shot, channel, shutters_checked)
-
-                    for t, m in self.all_markers.items():
-                        color = m['color']
-                        color = QColor(color[0], color[1], color[2])
-                        if self.scale_time and self.scalehandler is not None:
-                            t = self.scalehandler.get_scaled_time(t)
-                        line = self.plot_widgets[channel].addLine(x=t, pen=pg.mkPen(color=color, width=1.5, style=Qt.DashLine))
-                        self.all_marker_items[line] = self.plot_widgets[channel]
-
-                # If no, create one
-                else:
-                    self.create_plot(channel, ticked_shots)
-
-            else:
-                if channel not in self.plot_widgets:
-                    self.create_plot(channel, ticked_shots)
-                self.plot_widgets[channel].hide()
-
-        self._resample = True
+            self._resample = True
+        finally:
+            self._updating_plots = False
 
     def create_plot(self, channel, ticked_shots):
         self.plot_widgets[channel] = pg.PlotWidget()  # name=channel)
@@ -1201,8 +1608,7 @@ class RunViewer(object):
         plot_widget.show()
         
         # Define colors for different channels
-        colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), 
-                  (255, 0, 255), (0, 255, 255), (128, 128, 128)]
+        colors = self.group_colour_cycle
         
         # Track which channels/shots need to be removed
         keys_to_remove = []
@@ -1217,9 +1623,15 @@ class RunViewer(object):
             plot_widget.removeItem(self.plot_items[group_name][key])
             del self.plot_items[group_name][key]
         
+        # Get the full list of channels in the group to maintain consistent color assignments
+        all_group_channels = self.channel_groups.get(group_name, [])
+        
         # Plot each channel with a different color
-        for idx, channel in enumerate(channels):
+        for channel in channels:
+            # Assign color based on position in the full group, not the filtered list
+            idx = all_group_channels.index(channel) if channel in all_group_channels else 0
             color = QColor(*colors[idx % len(colors)])
+            self._set_group_channel_colour(group_name, channel, color)
             
             for shot, (shot_colour, shutters_checked) in ticked_shots.items():
                 if channel in shot.traces:
@@ -1227,8 +1639,10 @@ class RunViewer(object):
                     
                     # Create or update plot item
                     if key not in self.plot_items[group_name]:
+                        # For stepMode='center', x needs one more element than y
+                        # Start with minimal valid data - will be updated by resampling
                         plot_item = plot_widget.plot(
-                            [0, 0], [0], 
+                            [0, 1], [0], 
                             pen=pg.mkPen(color, width=2),
                             stepMode='center',
                             name=channel
@@ -1265,6 +1679,40 @@ class RunViewer(object):
             line = plot_widget.addLine(x=t, pen=pg.mkPen(color=color, width=1.5, style=Qt.DashLine))
             self.all_marker_items[line] = plot_widget
 
+    def _find_group_item(self, group_name):
+        for i in range(self.channel_model.rowCount()):
+            colour_item = self.channel_model.item(i, CHANNEL_MODEL__COLOUR_INDEX)
+            item = self.channel_model.item(i, CHANNEL_MODEL__CHECKBOX_INDEX)
+            if colour_item and colour_item.data(Qt.UserRole) == 'group' and item and str(item.text()) == group_name:
+                return colour_item  # Return the colour item which holds children
+        return None
+
+    def _set_group_channel_colour(self, group_name, channel_name, colour):
+        group_item = self._find_group_item(group_name)
+        if group_item is None:
+            return
+        for row in range(group_item.rowCount()):
+            name_item = group_item.child(row, CHANNEL_MODEL__CHANNEL_INDEX)
+            if name_item and str(name_item.text()) == channel_name:
+                colour_item = group_item.child(row, CHANNEL_MODEL__COLOUR_INDEX)
+                if colour_item is None:
+                    # Create colour item if it doesn't exist
+                    colour_item = QStandardItem('')
+                    colour_item.setEditable(False)
+                    group_item.setChild(row, CHANNEL_MODEL__COLOUR_INDEX, colour_item)
+                pixmap = QPixmap(16, 16)
+                pixmap.fill(colour)
+                colour_item.setData(QIcon(pixmap), Qt.DecorationRole)
+                break
+
+    def _apply_group_colours(self, group_name):
+        if group_name not in self.channel_groups:
+            return
+        colours = self.group_colour_cycle
+        channels = self.channel_groups[group_name]
+        for idx, channel in enumerate(channels):
+            self._set_group_channel_colour(group_name, channel, QColor(*colours[idx % len(colours)]))
+
     def add_shutter_markers(self, shot, channel, shutters_checked):
         if shot not in self.shutter_lines[channel] and channel in shot.shutter_times:
             self.shutter_lines[channel][shot] = [[], []]
@@ -1300,13 +1748,26 @@ class RunViewer(object):
     @inmain_decorator(wait_for_return=True)
     def _get_resample_params_for_group(self, group_name, channel, shot):
         key = (channel, shot)
-        if group_name in self.group_plot_widgets and key in self.plot_items[group_name]:
-            rect = self.plot_items[group_name][key].getViewBox().viewRect()
-            xmin, xmax = rect.left(), rect.width() + rect.left()
-            dx = xmax - xmin
-            view_range = self.group_plot_widgets[group_name].viewRange()
-            return view_range[0][0], view_range[0][1], dx
-        return 0, 1, 1
+        if group_name in self.group_plot_widgets:
+            plot_widget = self.group_plot_widgets[group_name]
+            if key in self.plot_items[group_name]:
+                try:
+                    rect = self.plot_items[group_name][key].getViewBox().viewRect()
+                    xmin, xmax = rect.left(), rect.width() + rect.left()
+                    dx = xmax - xmin
+                except:
+                    # Fallback if viewBox isn't ready
+                    view_range = plot_widget.viewRange()
+                    xmin, xmax = view_range[0][0], view_range[0][1]
+                    dx = xmax - xmin
+            else:
+                # Plot item doesn't exist yet, use the widget's full view range
+                view_range = plot_widget.viewRange()
+                xmin, xmax = view_range[0][0], view_range[0][1]
+                dx = xmax - xmin
+            return xmin, xmax, dx
+        # Fallback: return a reasonable default range
+        return 0, 10, 10
 
     def resample(self, data_x, data_y, xmin, xmax, stop_time, num_pixels):
         """This is a function for downsampling the data before plotting
@@ -1567,8 +2028,7 @@ class RunViewer(object):
                 key = (channel, shot)
                 if group_name in self.plot_items and key in self.plot_items[group_name]:
                     # Get the color for this channel in the group
-                    colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), 
-                              (255, 0, 255), (0, 255, 255), (128, 128, 128)]
+                    colors = self.group_colour_cycle
                     channels = self.channel_groups.get(group_name, [])
                     idx = channels.index(channel) if channel in channels else 0
                     color = QColor(*colors[idx % len(colors)])
@@ -1597,9 +2057,10 @@ class RunViewer(object):
     def group_checked_and_enabled(self, group_name):
         """Check if a group is checked and enabled"""
         for i in range(self.channel_model.rowCount()):
+            colour_item = self.channel_model.item(i, CHANNEL_MODEL__COLOUR_INDEX)
             item = self.channel_model.item(i, CHANNEL_MODEL__CHECKBOX_INDEX)
-            if item and item.data(Qt.UserRole) == 'group' and str(item.text()) == group_name:
-                if item.checkState() == Qt.Checked and item.isEnabled():
+            if colour_item and colour_item.data(Qt.UserRole) == 'group' and item and str(item.text()) == group_name:
+                if colour_item.checkState() == Qt.Checked and colour_item.isEnabled():
                     return True
         return False
 
@@ -1646,7 +2107,7 @@ class RunViewer(object):
     def _move_up(self):
         # Get the selection model from the treeview
         selection_model = self.ui.channel_treeview.selectionModel()
-        # Create a list of select row indices
+        # Create a list of selected row indices
         selected_row_list = [index.row() for index in sorted(selection_model.selectedRows())]
         # For each row selected
         for i, row in enumerate(selected_row_list):
@@ -1667,7 +2128,7 @@ class RunViewer(object):
     def _move_down(self):
         # Get the selection model from the treeview
         selection_model = self.ui.channel_treeview.selectionModel()
-        # Create a list of select row indices
+        # Create a list of selected row indices
         selected_row_list = [index.row() for index in reversed(sorted(selection_model.selectedRows()))]
         # For each row selected
         for i, row in enumerate(selected_row_list):
@@ -1688,7 +2149,7 @@ class RunViewer(object):
     def _move_top(self):
         # Get the selection model from the treeview
         selection_model = self.ui.channel_treeview.selectionModel()
-        # Create a list of select row indices
+        # Create a list of selected row indices
         selected_row_list = [index.row() for index in sorted(selection_model.selectedRows())]
         # For each row selected
         for i, row in enumerate(selected_row_list):
@@ -1709,7 +2170,7 @@ class RunViewer(object):
 
     def _move_bottom(self):
         selection_model = self.ui.channel_treeview.selectionModel()
-        # Create a list of select row indices
+        # Create a list of selected row indices
         selected_row_list = [index.row() for index in reversed(sorted(selection_model.selectedRows()))]
         # For each row selected
         for i, row in enumerate(selected_row_list):
@@ -1738,19 +2199,24 @@ class RunViewer(object):
 
         # add all widgets
         for i in range(self.channel_model.rowCount()):
-            check_item = self.channel_model.item(i, CHANNEL_MODEL__CHECKBOX_INDEX)
+            # Check column 0 first to see if this is a group
+            colour_item = self.channel_model.item(i, CHANNEL_MODEL__COLOUR_INDEX)
             
             # Handle groups
-            if check_item.data(Qt.UserRole) == 'group':
-                group_name = str(check_item.text())
+            if colour_item and colour_item.data(Qt.UserRole) == 'group':
+                name_item = self.channel_model.item(i, CHANNEL_MODEL__CHANNEL_INDEX)
+                group_name = str(name_item.text()) if name_item else ''
                 if group_name in self.group_plot_widgets:
                     self.ui.plot_layout.addWidget(self.group_plot_widgets[group_name])
-                    if check_item.checkState() == Qt.Checked and check_item.isEnabled():
+                    if colour_item.checkState() == Qt.Checked and colour_item.isEnabled():
                         self.group_plot_widgets[group_name].show()
                     else:
                         self.group_plot_widgets[group_name].hide()
             else:
                 # Handle individual channels
+                check_item = self.channel_model.item(i, CHANNEL_MODEL__CHECKBOX_INDEX)
+                if not check_item:
+                    continue
                 channel = str(check_item.text())
                 if channel in self.plot_widgets:
                     self.ui.plot_layout.addWidget(self.plot_widgets[channel])
