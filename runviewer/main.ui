@@ -314,6 +314,16 @@ QToolButton:hover:checked {
                          </property>
                         </widget>
                      </item>
+                     <item>
+                        <widget class="QPushButton" name="auto_group_channels">
+                         <property name="toolTip">
+                            <string>Auto-group channels by type</string>
+                         </property>
+                         <property name="text">
+                            <string/>
+                         </property>
+                        </widget>
+                     </item>
               <item>
                <widget class="QPushButton" name="show_all_channels">
                 <property name="maximumSize">

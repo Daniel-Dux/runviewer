@@ -286,6 +286,7 @@ class RunViewer(object):
         # New controls
         self.ui.group_all_channels.setIcon(QIcon(':/qtutils/fugue/layers-group'))
         self.ui.release_all_groups.setIcon(QIcon(':/qtutils/fugue/layers-ungroup'))
+        self.ui.auto_group_channels.setIcon(QIcon(':/qtutils/fugue/layers-arrange'))
         self.ui.show_all_channels.setIcon(QIcon(':/qtutils/fugue/application-list'))
         self.ui.remove_all_shots.setIcon(QIcon(':/qtutils/fugue/minus'))
         self.ui.activate_newest_shot.setIcon(QIcon(':/qtutils/fugue/clock-history'))
@@ -327,6 +328,7 @@ class RunViewer(object):
         # New controls handlers
         self.ui.group_all_channels.clicked.connect(self.on_group_all_channels)
         self.ui.release_all_groups.clicked.connect(self.on_release_all_groups)
+        self.ui.auto_group_channels.clicked.connect(self.on_auto_group_channels)
         self.ui.show_all_channels.clicked.connect(self.on_show_all_channels)
         self.ui.remove_all_shots.clicked.connect(self.on_remove_all_shots)
         self.ui.activate_newest_shot.clicked.connect(self.on_activate_newest_shot)
@@ -1060,21 +1062,158 @@ class RunViewer(object):
         self.update_plot_positions()
         self.update_plots()
 
+    def on_auto_group_channels(self):
+        """Auto-group channels by their device type."""
+        # First, release all existing groups
+        self.on_release_all_groups()
+        
+        # Get all ticked shots to access channel information
+        ticked_shots = self.get_selected_shots_and_colours()
+        if not ticked_shots:
+            QMessageBox.information(self.ui, 'Auto Group Channels',
+                                  'Please load and select at least one shot first.')
+            return
+        
+        # Collect all channels and their types
+        channel_types = {}
+        for shot in ticked_shots.keys():
+            for channel_name in shot.channels:
+                if channel_name not in channel_types:
+                    try:
+                        # Get the connection for this channel
+                        con = shot.connection_table.find_by_name(channel_name)
+                        if con and hasattr(con, 'device_class'):
+                            device_class = con.device_class
+                            # Simplify some common types
+                            if 'DigitalOut' in device_class or 'StaticDigitalOut' in device_class:
+                                channel_types[channel_name] = 'Digital Outputs'
+                            elif 'AnalogOut' in device_class or 'StaticAnalogOut' in device_class:
+                                channel_types[channel_name] = 'Analog Outputs'
+                            elif 'AnalogIn' in device_class:
+                                channel_types[channel_name] = 'Analog Inputs'
+                            elif 'DDS' in device_class:
+                                channel_types[channel_name] = 'DDS'
+                            elif 'Shutter' in device_class:
+                                channel_types[channel_name] = 'Shutters'
+                            else:
+                                # Use the device class name as-is for other types
+                                channel_types[channel_name] = device_class
+                        else:
+                            channel_types[channel_name] = 'Other'
+                    except:
+                        channel_types[channel_name] = 'Other'
+        
+        # Group channels by type
+        type_groups = {}
+        for channel, channel_type in channel_types.items():
+            if channel_type not in type_groups:
+                type_groups[channel_type] = []
+            type_groups[channel_type].append(channel)
+        
+        print(f"\nChannel type summary before filtering:")
+        for group_name, channels in sorted(type_groups.items()):
+            print(f"  {group_name}: {len(channels)} channels - {channels}")
+        
+        # Remove types with only one channel
+        type_groups = {k: v for k, v in type_groups.items() if len(v) > 1}
+        
+        print(f"\nChannel type summary after filtering (≥2 channels):")
+        for group_name, channels in sorted(type_groups.items()):
+            print(f"  {group_name}: {len(channels)} channels - {channels}")
+        
+        if not type_groups:
+            QMessageBox.information(self.ui, 'Auto Group Channels',
+                                  'No channel types with multiple channels found to group.\n\n'
+                                  'Auto-grouping only creates groups for types with 2 or more channels.')
+            return
+        
+        # Create a group for each type
+        self.channel_model.blockSignals(True)
+        
+        for group_name, channels in sorted(type_groups.items()):
+            # Sort channels alphabetically within each group
+            channels.sort()
+            
+            # Store in tracking
+            self.channel_groups[group_name] = channels
+            
+            # Create group items
+            group_colour_item = QStandardItem('')
+            group_colour_item.setEditable(False)
+            group_colour_item.setCheckable(True)
+            group_colour_item.setCheckState(Qt.Checked)
+            group_colour_item.setData('group', Qt.UserRole)
+            
+            group_item = QStandardItem(group_name)
+            group_item.setEditable(False)
+            
+            # Find and move channels into the group
+            for channel_name in channels:
+                # Find the channel in the model
+                for i in range(self.channel_model.rowCount()):
+                    item = self.channel_model.item(i, CHANNEL_MODEL__CHANNEL_INDEX)
+                    if item and str(item.text()) == channel_name:
+                        # Remember check state
+                        was_checked = item.checkState() == Qt.Checked
+                        
+                        # Remove individual plot widget if it exists
+                        if channel_name in self.plot_widgets:
+                            self.ui.plot_layout.removeWidget(self.plot_widgets[channel_name])
+                            self.plot_widgets[channel_name].deleteLater()
+                            del self.plot_widgets[channel_name]
+                        if channel_name in self.plot_items:
+                            del self.plot_items[channel_name]
+                        if channel_name in self.shutter_lines:
+                            del self.shutter_lines[channel_name]
+                        
+                        # Take the row and add to group
+                        taken_items = self.channel_model.takeRow(i)
+                        while len(taken_items) < 2:
+                            taken_items.insert(0, QStandardItem(''))
+                        
+                        name_item = taken_items[CHANNEL_MODEL__CHANNEL_INDEX]
+                        if name_item:
+                            name_item.setCheckable(True)
+                            name_item.setCheckState(Qt.Checked if was_checked else Qt.Unchecked)
+                        
+                        group_colour_item.appendRow(taken_items)
+                        break
+            
+            # Add the group to the model
+            self.channel_model.appendRow([group_colour_item, group_item])
+            
+            # Apply colors
+            self._apply_group_colours(group_name)
+            
+            # Expand the group
+            self.ui.channel_treeview.expand(self.channel_model.indexFromItem(group_colour_item))
+        
+        self.channel_model.blockSignals(False)
+        self.channel_model.layoutChanged.emit()
+        self.update_plot_positions()
+        self.update_plots()
+
     def on_show_all_channels(self):
         """Check all enabled channels (and groups) so every channel is shown."""
 
         def check_branch(item):
             if item is None:
                 return
-            if item.isEnabled():
+            # Check if this item itself is checkable and enabled
+            if item.isCheckable() and item.isEnabled():
                 item.setCheckState(Qt.Checked)
+            # Recursively check children in column 0 (for groups)
             for i in range(item.rowCount()):
-                child = item.child(i, 0)
-                check_branch(child)
+                child_col0 = item.child(i, 0)
+                child_col1 = item.child(i, 1)
+                check_branch(child_col0)
+                check_branch(child_col1)
 
         self.channel_model.blockSignals(True)
         for i in range(self.channel_model.rowCount()):
-            check_branch(self.channel_model.item(i, CHANNEL_MODEL__CHECKBOX_INDEX))
+            # Check both columns since different items are checkable in different columns
+            check_branch(self.channel_model.item(i, 0))
+            check_branch(self.channel_model.item(i, 1))
         self.channel_model.blockSignals(False)
         self.channel_model.layoutChanged.emit()
         self.update_plot_positions()
